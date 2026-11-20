@@ -1,0 +1,144 @@
+import json
+import os
+from datetime import datetime, timezone
+from urllib import error, request
+
+
+class BluePlanetMonitor:
+    def __init__(self, gemini_api_key: str = ""):
+        self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY", "")
+        self.observations: list[dict] = []
+
+    def ingest_and_filter_metrics(self, reading: dict) -> dict:
+        """Validate and clean raw ecological & sensor telemetry before analysis."""
+        region = str(reading.get("region") or "").strip()
+        if not region:
+            raise ValueError("Region name is required for ecological telemetry.")
+
+        # Clamp out-of-range noise values safely while flagging anomalies
+        raw_temp = float(reading.get("temperature_c", 25.0))
+        raw_humidity = float(reading.get("humidity_pct", 60.0))
+        raw_green_cover = float(reading.get("green_cover_pct", 50.0))
+
+        anomalies = []
+        if not (-60.0 <= raw_temp <= 60.0):
+            anomalies.append("temperature_out_of_range")
+        if not (0.0 <= raw_humidity <= 100.0):
+            anomalies.append("humidity_out_of_range")
+        if not (0.0 <= raw_green_cover <= 100.0):
+            anomalies.append("green_cover_out_of_range")
+
+        cleaned = {
+            "region": region,
+            "source": reading.get("source", "environmental_feed"),
+            "temperature_c": max(-60.0, min(60.0, raw_temp)),
+            "humidity_pct": max(0.0, min(100.0, raw_humidity)),
+            "green_cover_pct": max(0.0, min(100.0, raw_green_cover)),
+            "visual_clarity_score": max(0.0, min(1.0, float(reading.get("visual_clarity_score", 0.85)))),
+            "anomalies": anomalies,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        return cleaned
+
+    def _local_ecological_assessment(self, metrics: dict) -> dict:
+        """Generate clear, practical summary and recommendations without external API."""
+        temp = metrics["temperature_c"]
+        green = metrics["green_cover_pct"]
+        anomalies = metrics["anomalies"]
+
+        if anomalies or temp >= 38.0 or green < 25.0:
+            risk_level = "high_attention"
+            citizen_note = f"{metrics['region']} এলাকায় পরিবেশগত চাপ বা অস্বাভাবিক রিডিং ধরা পড়েছে; জল ও সবুজ সুরক্ষায় সতর্ক থাকা জরুরি।"
+            policy_action = "Conduct targeted field verification, inspect heat/vegetation stress, and prioritize local restoration."
+        elif temp >= 32.0 or green < 45.0:
+            risk_level = "moderate_watch"
+            citizen_note = f"{metrics['region']} অঞ্চলের পরিবেশগত সূচক মাঝারি পর্যায়ে আছে; নিয়মিত পর্যবেক্ষণ ও গাছপালা সংরক্ষণ প্রয়োজন।"
+            policy_action = "Track seasonal shifts closely and support community tree planting and water conservation."
+        else:
+            risk_level = "stable_balanced"
+            citizen_note = f"{metrics['region']} অঞ্চলের পর্যবেক্ষিত পরিবেশগত মান তুলনামূলকভাবে স্থিতিশীল রয়েছে।"
+            policy_action = "Maintain baseline monitoring and share transparent public status updates."
+
+        return {
+            "risk_level": risk_level,
+            "citizen_summary": citizen_note,
+            "policy_recommendation": policy_action,
+            "mode": "local_analysis",
+        }
+
+    def _call_gemini_insight(self, metrics: dict) -> dict | None:
+        """Optionally request synthesized ecological insight from Gemini API."""
+        if not self.gemini_api_key:
+            return None
+
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-2.0-flash:generateContent?key={self.gemini_api_key}"
+        )
+        prompt = (
+            "Analyze this ecological telemetry JSON and return concise JSON with keys "
+            "'risk_level', 'citizen_summary', and 'policy_recommendation': "
+            f"{json.dumps(metrics)}"
+        )
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+        }
+
+        try:
+            req = request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with request.urlopen(req, timeout=10.0) as resp:
+                raw = json.loads(resp.read().decode("utf-8"))
+                text_out = raw.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                return {
+                    "risk_level": "gemini_evaluated",
+                    "citizen_summary": text_out.strip() or "Insight generated via Gemini API.",
+                    "policy_recommendation": "Review generated ecological summary alongside regional telemetry.",
+                    "mode": "gemini_api",
+                }
+        except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+            print(f"[BluePlanetMonitor] Gemini API fallback triggered ({exc}).")
+            return None
+
+    def analyze_region(self, reading: dict) -> dict:
+        """Full pipeline: filter metrics -> generate insight (API or local) -> store report."""
+        cleaned = self.ingest_and_filter_metrics(reading)
+        insight = self._call_gemini_insight(cleaned) or self._local_ecological_assessment(cleaned)
+
+        report = {
+            "metrics": cleaned,
+            "insight": insight,
+        }
+        self.observations.append(report)
+        return report
+
+
+if __name__ == "__main__":
+    monitor = BluePlanetMonitor()
+
+    sample_readings = [
+        {
+            "region": "Cumilla & Meghna Basin",
+            "source": "satellite_and_station_feed",
+            "temperature_c": 33.5,
+            "humidity_pct": 74.0,
+            "green_cover_pct": 42.0,
+            "visual_clarity_score": 0.91,
+        },
+        {
+            "region": "Sundarbans Buffer Zone",
+            "source": "field_monitoring_node",
+            "temperature_c": 29.2,
+            "humidity_pct": 81.0,
+            "green_cover_pct": 78.5,
+            "visual_clarity_score": 0.88,
+        },
+    ]
+
+    for sample in sample_readings:
+        output = monitor.analyze_region(sample)
+        print(json.dumps(output, indent=2, ensure_ascii=False))
